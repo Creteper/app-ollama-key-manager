@@ -1,8 +1,6 @@
-import { createClient } from '@libsql/client';
+import mysql from 'mysql2/promise';
 import { nanoid } from 'nanoid';
-import path from 'path';
 import { randomBytes, createHash } from 'crypto';
-import fs from 'fs';
 
 export interface ApiKey {
   id: string;
@@ -15,25 +13,31 @@ export interface ApiKey {
   usage_count: number;
 }
 
-const DB_PATH = process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'keys.db');
+// MySQL connection configuration
+const dbConfig = {
+  host: process.env.MYSQL_HOST || 'mysql',
+  port: parseInt(process.env.MYSQL_PORT || '3306'),
+  user: process.env.MYSQL_USER || 'ollama_user',
+  password: process.env.MYSQL_PASSWORD || 'ollama_password',
+  database: process.env.MYSQL_DATABASE || 'ollama_keys',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+};
 
-let db: ReturnType<typeof createClient> | null = null;
+let pool: mysql.Pool | null = null;
 let dbInitPromise: Promise<void> | null = null;
 
-async function getDb() {
-  if (!db) {
+async function getDb(): Promise<mysql.Pool> {
+  if (!pool) {
     try {
-      // Ensure the data directory exists
-      const dbDir = path.dirname(DB_PATH);
-      if (!fs.existsSync(dbDir)) {
-        console.log(`Creating database directory: ${dbDir}`);
-        fs.mkdirSync(dbDir, { recursive: true });
-      }
+      console.log(`Connecting to MySQL at ${dbConfig.host}:${dbConfig.port}`);
+      pool = mysql.createPool(dbConfig);
 
-      console.log(`Initializing database at: ${DB_PATH}`);
-      db = createClient({
-        url: `file:${DB_PATH}`
-      });
+      // Test the connection
+      const connection = await pool.getConnection();
+      console.log('MySQL connection established successfully');
+      connection.release();
 
       // Initialize database and wait for it to complete
       if (!dbInitPromise) {
@@ -43,36 +47,42 @@ async function getDb() {
       console.log('Database initialized successfully');
     } catch (error) {
       console.error('Failed to initialize database:', error);
-      console.error('Database path:', DB_PATH);
-      console.error('Process CWD:', process.cwd());
-      console.error('Process UID:', process.getuid?.());
-      console.error('Process GID:', process.getgid?.());
+      console.error('MySQL config:', {
+        host: dbConfig.host,
+        port: dbConfig.port,
+        user: dbConfig.user,
+        database: dbConfig.database,
+      });
       throw new Error(`Database initialization failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   } else if (dbInitPromise) {
-    // If db exists but initialization is still in progress, wait for it
+    // If pool exists but initialization is still in progress, wait for it
     await dbInitPromise;
   }
-  return db;
+  return pool;
 }
 
 async function initDatabase() {
-  if (!db) return;
+  if (!pool) return;
 
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS api_keys (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      key_hash TEXT NOT NULL UNIQUE,
-      provider TEXT NOT NULL CHECK(provider IN ('claude', 'openai')),
-      created_at INTEGER NOT NULL,
-      last_used_at INTEGER,
-      usage_count INTEGER DEFAULT 0
-    )
-  `);
-
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_key_hash ON api_keys(key_hash)`);
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_provider ON api_keys(provider)`);
+  try {
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS api_keys (
+        id VARCHAR(21) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        key_hash VARCHAR(64) NOT NULL UNIQUE,
+        provider ENUM('claude', 'openai') NOT NULL,
+        created_at BIGINT NOT NULL,
+        last_used_at BIGINT,
+        usage_count INT DEFAULT 0,
+        INDEX idx_key_hash (key_hash),
+        INDEX idx_provider (provider)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+  } catch (error) {
+    console.error('Failed to create table:', error);
+    throw error;
+  }
 }
 
 function hashKey(key: string): string {
@@ -87,17 +97,17 @@ export function generateApiKey(): string {
 }
 
 export async function createApiKey(name: string, provider: 'claude' | 'openai'): Promise<ApiKey> {
-  const database = getDb();
+  const database = await getDb();
   const id = nanoid();
   const key = generateApiKey();
   const key_hash = hashKey(key);
   const created_at = Date.now();
 
-  await database.execute({
-    sql: `INSERT INTO api_keys (id, name, key_hash, provider, created_at, last_used_at, usage_count)
-          VALUES (?, ?, ?, ?, ?, NULL, 0)`,
-    args: [id, name, key_hash, provider, created_at]
-  });
+  await database.execute(
+    `INSERT INTO api_keys (id, name, key_hash, provider, created_at, last_used_at, usage_count)
+     VALUES (?, ?, ?, ?, ?, NULL, 0)`,
+    [id, name, key_hash, provider, created_at]
+  );
 
   return {
     id,
@@ -112,63 +122,64 @@ export async function createApiKey(name: string, provider: 'claude' | 'openai'):
 }
 
 export async function listApiKeys(): Promise<Omit<ApiKey, 'key'>[]> {
-  const database = getDb();
-  const result = await database.execute(
+  const database = await getDb();
+  const [rows] = await database.execute(
     `SELECT id, name, key_hash, provider, created_at, last_used_at, usage_count
      FROM api_keys
      ORDER BY created_at DESC`
   );
 
-  return result.rows.map(row => ({
-    id: row.id as string,
-    name: row.name as string,
-    key_hash: row.key_hash as string,
-    provider: row.provider as 'claude' | 'openai',
-    created_at: row.created_at as number,
-    last_used_at: row.last_used_at as number | null,
-    usage_count: row.usage_count as number,
+  return (rows as any[]).map(row => ({
+    id: row.id,
+    name: row.name,
+    key_hash: row.key_hash,
+    provider: row.provider,
+    created_at: row.created_at,
+    last_used_at: row.last_used_at,
+    usage_count: row.usage_count,
   }));
 }
 
 export async function deleteApiKey(id: string): Promise<boolean> {
-  const database = getDb();
-  const result = await database.execute({
-    sql: 'DELETE FROM api_keys WHERE id = ?',
-    args: [id]
-  });
-  return result.rowsAffected > 0;
+  const database = await getDb();
+  const [result] = await database.execute(
+    'DELETE FROM api_keys WHERE id = ?',
+    [id]
+  );
+  return (result as any).affectedRows > 0;
 }
 
 export async function validateApiKey(key: string): Promise<{ valid: boolean; keyData?: Omit<ApiKey, 'key'> }> {
-  const database = getDb();
+  const database = await getDb();
   const key_hash = hashKey(key);
 
-  const result = await database.execute({
-    sql: `SELECT id, name, key_hash, provider, created_at, last_used_at, usage_count
-          FROM api_keys
-          WHERE key_hash = ?`,
-    args: [key_hash]
-  });
+  const [rows] = await database.execute(
+    `SELECT id, name, key_hash, provider, created_at, last_used_at, usage_count
+     FROM api_keys
+     WHERE key_hash = ?`,
+    [key_hash]
+  );
 
-  if (result.rows.length > 0) {
-    const row = result.rows[0];
+  const results = rows as any[];
+  if (results.length > 0) {
+    const row = results[0];
     const keyData = {
-      id: row.id as string,
-      name: row.name as string,
-      key_hash: row.key_hash as string,
-      provider: row.provider as 'claude' | 'openai',
-      created_at: row.created_at as number,
-      last_used_at: row.last_used_at as number | null,
-      usage_count: row.usage_count as number,
+      id: row.id,
+      name: row.name,
+      key_hash: row.key_hash,
+      provider: row.provider,
+      created_at: row.created_at,
+      last_used_at: row.last_used_at,
+      usage_count: row.usage_count,
     };
 
     // Update last used timestamp and usage count
-    await database.execute({
-      sql: `UPDATE api_keys
-            SET last_used_at = ?, usage_count = usage_count + 1
-            WHERE id = ?`,
-      args: [Date.now(), keyData.id]
-    });
+    await database.execute(
+      `UPDATE api_keys
+       SET last_used_at = ?, usage_count = usage_count + 1
+       WHERE id = ?`,
+      [Date.now(), keyData.id]
+    );
 
     return { valid: true, keyData };
   }
@@ -177,33 +188,35 @@ export async function validateApiKey(key: string): Promise<{ valid: boolean; key
 }
 
 export async function getApiKeyById(id: string): Promise<Omit<ApiKey, 'key'> | null> {
-  const database = getDb();
-  const result = await database.execute({
-    sql: `SELECT id, name, key_hash, provider, created_at, last_used_at, usage_count
-          FROM api_keys
-          WHERE id = ?`,
-    args: [id]
-  });
+  const database = await getDb();
+  const [rows] = await database.execute(
+    `SELECT id, name, key_hash, provider, created_at, last_used_at, usage_count
+     FROM api_keys
+     WHERE id = ?`,
+    [id]
+  );
 
-  if (result.rows.length === 0) {
+  const results = rows as any[];
+  if (results.length === 0) {
     return null;
   }
 
-  const row = result.rows[0];
+  const row = results[0];
   return {
-    id: row.id as string,
-    name: row.name as string,
-    key_hash: row.key_hash as string,
-    provider: row.provider as 'claude' | 'openai',
-    created_at: row.created_at as number,
-    last_used_at: row.last_used_at as number | null,
-    usage_count: row.usage_count as number,
+    id: row.id,
+    name: row.name,
+    key_hash: row.key_hash,
+    provider: row.provider,
+    created_at: row.created_at,
+    last_used_at: row.last_used_at,
+    usage_count: row.usage_count,
   };
 }
 
 export async function closeDb() {
-  if (db) {
-    await db.close();
-    db = null;
+  if (pool) {
+    await pool.end();
+    pool = null;
+    dbInitPromise = null;
   }
 }

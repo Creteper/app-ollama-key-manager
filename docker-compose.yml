@@ -1,6 +1,27 @@
 version: '3.8'
 
 services:
+  mysql:
+    image: mysql:8.0
+    container_name: ollama-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-ollama_keys}
+      MYSQL_USER: ${MYSQL_USER:-ollama_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-ollama_password}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    restart: unless-stopped
+    networks:
+      - ollama-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-root_password}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   ollama-key-manager:
     build:
       context: .
@@ -10,17 +31,20 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
+      # MySQL connection
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=${MYSQL_USER:-ollama_user}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-ollama_password}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-ollama_keys}
       # Optional: Set your Claude and OpenAI API keys
       - CLAUDE_API_KEY=${CLAUDE_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      # Database path
-      - DATABASE_PATH=/app/data/keys.db
       # Admin password for initial setup (change this!)
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
-    volumes:
-      # Persist SQLite database
-      - ./data:/app/data:rw
-    user: "1001:1001"  # Match the nextjs user from Dockerfile
+    depends_on:
+      mysql:
+        condition: service_healthy
     restart: unless-stopped
     networks:
       - ollama-network
@@ -38,6 +62,7 @@ services:
       - ollama-network
 
 volumes:
+  mysql-data:
   ollama-data:
 
 networks:

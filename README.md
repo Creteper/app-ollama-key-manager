@@ -9,16 +9,17 @@
 - **🔄 Ollama 代理**: 透明代理所有 Ollama API 端点
 - **🛡️ 灵活认证**: 支持 Bearer token 和 X-API-Key 两种请求头
 - **📊 使用追踪**: 跟踪每个密钥的使用次数和最后使用时间
-- **🔒 安全存储**: 密钥使用 SHA-256 哈希后存储
+- **🔒 安全存储**: 密钥使用 SHA-256 哈希后存储在 MySQL 数据库
 - **⚡ 流式支持**: 完整支持流式响应
 - **🐳 Docker 支持**: 使用 Docker 和 Docker Compose 轻松部署
+- **💾 MySQL 存储**: 使用 MySQL 8.0 数据库确保数据可靠性和扩展性
 - **🎨 现代化 UI**: 使用 Next.js 和 Tailwind CSS 构建的清爽响应式界面
 - **🌙 深色模式**: 支持亮色/暗色主题
 
 ## 📋 前置要求
 
-- Docker 和 Docker Compose (Docker 部署方式)
-- 或 Node.js 20+ 和 pnpm (本地开发方式)
+- Docker 和 Docker Compose (Docker 部署方式) - 推荐
+- 或 Node.js 20+ 和 pnpm + MySQL 8.0+ (本地开发方式)
 - Ollama 服务器 (本地或远程)
 
 ## 🚀 快速开始
@@ -38,8 +39,13 @@
 
 3. **编辑 `.env` 文件并配置必要参数**
    ```env
-   # 数据库配置
-   DATABASE_PATH=./data/keys.db
+   # MySQL 数据库配置
+   MYSQL_HOST=mysql
+   MYSQL_PORT=3306
+   MYSQL_USER=ollama_user
+   MYSQL_PASSWORD=ollama_password
+   MYSQL_DATABASE=ollama_keys
+   MYSQL_ROOT_PASSWORD=root_password
 
    # Ollama 服务器地址
    OLLAMA_API_URL=http://localhost:11434
