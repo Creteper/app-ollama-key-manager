@@ -19,7 +19,8 @@ services:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
     volumes:
       # Persist SQLite database
-      - ./data:/app/data
+      - ./data:/app/data:rw
+    user: "1001:1001"  # Match the nextjs user from Dockerfile
     restart: unless-stopped
     networks:
       - ollama-network

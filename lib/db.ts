@@ -2,6 +2,7 @@ import { createClient } from '@libsql/client';
 import { nanoid } from 'nanoid';
 import path from 'path';
 import { randomBytes, createHash } from 'crypto';
+import fs from 'fs';
 
 export interface ApiKey {
   id: string;
@@ -17,27 +18,40 @@ export interface ApiKey {
 const DB_PATH = process.env.DATABASE_PATH || path.join(process.cwd(), 'data', 'keys.db');
 
 let db: ReturnType<typeof createClient> | null = null;
+let dbInitPromise: Promise<void> | null = null;
 
-function getDb() {
+async function getDb() {
   if (!db) {
     try {
       // Ensure the data directory exists
       const dbDir = path.dirname(DB_PATH);
-      const fs = require('fs');
       if (!fs.existsSync(dbDir)) {
+        console.log(`Creating database directory: ${dbDir}`);
         fs.mkdirSync(dbDir, { recursive: true });
       }
 
+      console.log(`Initializing database at: ${DB_PATH}`);
       db = createClient({
         url: `file:${DB_PATH}`
       });
 
-      initDatabase();
+      // Initialize database and wait for it to complete
+      if (!dbInitPromise) {
+        dbInitPromise = initDatabase();
+      }
+      await dbInitPromise;
+      console.log('Database initialized successfully');
     } catch (error) {
       console.error('Failed to initialize database:', error);
       console.error('Database path:', DB_PATH);
+      console.error('Process CWD:', process.cwd());
+      console.error('Process UID:', process.getuid?.());
+      console.error('Process GID:', process.getgid?.());
       throw new Error(`Database initialization failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
+  } else if (dbInitPromise) {
+    // If db exists but initialization is still in progress, wait for it
+    await dbInitPromise;
   }
   return db;
 }
